@@ -2,20 +2,11 @@ import scala.language.higherKinds
 import scala.language.implicitConversions
 
 trait CT1v0 {
-  trait Monad[M[_]] {
-    def unit[A](a: A): M[A]
-    def bind[A, B](ma: M[A])(f: A => M[B]): M[B]
-  }
+  trait Fresh extends Iterator[Name => Name] {
+    def next(default: Name): Name
 
-  // fresh-name type class
-  abstract class Fresh[M[_]](implicit val monadInstance: Monad[M]) {
-    def fresh(default: Name): M[Name]
-  }
-
-  implicit class MonadComprehension[M[_], A](ma: M[A])(implicit instance: Monad[M]) {
-    import instance._
-    def map[B](f: A => B): M[B] = bind(ma)(a => unit(f(a)))
-    def flatMap[B](f: A => M[B]): M[B] = bind(ma)(f)
+    def next: Name => Name = x => next(x)
+    def hasNext: Boolean = true
   }
 
   trait Name {
@@ -112,14 +103,12 @@ trait CT1v0 {
   object All extends TypeBinder  {
     def apply(head: TVar, body: Type): Type = Universal(head, bind(head, body))
 
-    def unapply[M[_]](typ: Type)(implicit instance: Fresh[M]): Option[M[(TVar, Type)]] =
+    def unapply[M[_]](typ: Type)(implicit fresh: Fresh): Option[(TVar, Type)] =
       typ match {
         case Universal(head, body) =>
-          import instance._
-          val m: M[(TVar, Type)] = for {
-            name <- new MonadComprehension(fresh(head.name))(monadInstance)
-          } yield (mkVar(name), unbind(name, body))
-          Some(m)
+          val name = fresh next head.name
+          val tau = unbind(name, body)
+          Some((mkVar(name), tau))
 
         case _ =>
           None
@@ -131,97 +120,41 @@ trait CT1v0 {
 
 trait Pretty extends CT1v0 {
 
-  // reader monad: generates shadowing-avoiding names
-
-  case class FreshReader[T](run: Set[Name] => T)
-
-  object FreshReader {
-    def unit[A](a: A): FreshReader[A] = FreshReader(_ => a)
+  case class Avoider(toAvoid: Set[Name]) extends Fresh {
+    def next(default: Name): Name = default.iterator.filterNot(toAvoid contains _).next
+    def avoid(name: Name): Avoider = copy(toAvoid = toAvoid + name)
   }
 
-  implicit object FreshReaderMonad extends Monad[FreshReader] {
-    def unit[A](a: A): FreshReader[A] = FreshReader.unit(a)
-    def bind[A, B](ma: FreshReader[A])(f: A => FreshReader[B]): FreshReader[B] =
-      FreshReader(avoid => f(ma.run(avoid)).run(avoid))
+  def pretty(typ: Type)(implicit avoider: Avoider = Avoider(Set.empty)): String = typ match {
+    case TVar(name) =>
+      name.toString
+
+    case Arrow(domain, range) =>
+      s"(${pretty(domain)} -> ${pretty(range)})"
+
+    case All(a, body) =>
+      s"(∀${a.name}. ${pretty(body)(avoider avoid a.name)})"
   }
 
-  object FreshReaderFresh extends Fresh[FreshReader] {
-    def fresh(default: Name): FreshReader[Name] = freshReader(default)
+  case class Counter(var i: Int = -1) extends Fresh {
+    def next(default: Name): Name = { i += 1 ; IntegralName(i) }
   }
 
-  def freshReader(default: Name): FreshReader[Name] =
-    FreshReader(avoid => default.iterator.find(name => ! avoid(name)).get)
+  def plain(typ: Type)(implicit counter: Fresh = Counter()): String = typ match {
+    case TVar(name) =>
+      name.toString
 
-  def avoidThis[T](name: Name, freshM: FreshReader[T]): FreshReader[T] =
-    FreshReader(avoid => freshM.run(avoid + name))
+    case Arrow(domain, range) =>
+      s"(${plain(domain)} -> ${plain(range)})"
 
-  // identity monad: generates global names
-
-  case class NewType[T](get: T)
-
-  implicit object NewTypeMonad extends Monad[NewType] {
-    def unit[A](a: A): NewType[A] = NewType(a)
-    def bind[A, B](ma: NewType[A])(f: A => NewType[B]): NewType[B] = f(ma.get)
+    case All(a, body) =>
+      s"(∀${a.name}. ${plain(body)})"
   }
-
-  object NewTypeFresh extends Fresh[NewType] {
-    var counter = -1
-    def fresh(default: Name): NewType[Name] = {
-      counter += 1
-      NewType(IntegralName(counter))
-    }
-  }
-
-  def prettyM(typ: Type): FreshReader[String] = {
-    implicit val freshness = FreshReaderFresh
-    typ match {
-      case TVar(name) =>
-        FreshReader.unit(name.toString)
-
-      case Arrow(domain, range) =>
-        for {
-          sigma <- prettyM(domain)
-          tau <- prettyM(range)
-        } yield s"($sigma -> $tau)"
-
-      case All(m) =>
-        for {
-          data <- m
-          (alpha, body) = data // if we connect the 2 occurrences of `data`, then get "filter is not a member"
-          tau <- avoidThis(alpha.name, prettyM(body))
-        } yield s"(∀${alpha.name}. $tau)"
-    }
-  }
-
-  def pretty(typ: Type): String = prettyM(typ) run Set.empty
-
-  def uglyM(typ: Type): NewType[String] = {
-    implicit val freshness = NewTypeFresh
-    typ match {
-      case TVar(name) =>
-        NewType(name.toString)
-
-      case Arrow(domain, range) =>
-        for {
-          sigma <- uglyM(domain)
-          tau <- uglyM(range)
-        } yield s"($sigma -> $tau)"
-
-      case All(m) =>
-        for {
-          data <- m
-          (alpha, body) = data // if we connect the 2 occurrences of `data`, then get "filter is not a member"
-          tau <- uglyM(body)
-        } yield s"(∀${alpha.name}. $tau)"
-    }
-  }
-
-  def ugly(typ: Type): String = uglyM(typ).get
 }
 
 object Test extends App with Pretty {
   val idT = All('a, Arrow('a, All('a, Arrow(All('a, 'a), All('a, 'a)))))
 
   println(pretty(idT))
-  println(ugly(idT))
+  println(plain(idT))
 }
