@@ -125,7 +125,11 @@ trait Pretty extends CT1v0 {
     def avoid(name: Name): Avoider = copy(toAvoid = toAvoid + name)
   }
 
-  def pretty(typ: Type)(implicit avoider: Avoider = Avoider(Set.empty)): String = typ match {
+  object Avoider {
+    def empty: Avoider = Avoider(Set.empty)
+  }
+
+  def pretty(typ: Type)(implicit avoider: Avoider = Avoider.empty): String = typ match {
     case TVar(name) =>
       name.toString
 
@@ -150,11 +154,36 @@ trait Pretty extends CT1v0 {
     case All(a, body) =>
       s"(∀${a.name}. ${plain(body)})"
   }
+
+  def parsimonious(typ: Type): String = {
+    implicit def avoider: Avoider = Avoider(typ.fv.map(_.name))
+    typ match {
+      case TVar(name) =>
+        name.toString
+
+      case Arrow(domain, range) =>
+        s"(${parsimonious(domain)} -> ${parsimonious(range)})"
+
+      case All(a, body) =>
+        s"(∀${a.name}. ${parsimonious(body)})"
+    }
+  }
 }
 
 object Test extends App with Pretty {
   val idT = All('a, Arrow('a, All('a, Arrow(All('a, 'a), All('a, 'a)))))
 
+  // note that indices are depths, not de-Bruijn indices.
+  // it is so that we don't have to distinguish binders at runtime in ADTs.
+  val shadowy = All('a, Arrow('a, All('a, Arrow(All('a, TIdx(2)), All('a, TIdx(4))))))
+
   println(pretty(idT))
   println(plain(idT))
+  println(parsimonious(idT))
+
+  println()
+
+  println(pretty(shadowy))
+  println(plain(shadowy))
+  println(parsimonious(shadowy))
 }
