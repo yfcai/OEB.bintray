@@ -2,6 +2,8 @@ import scala.language.higherKinds
 import scala.language.implicitConversions
 
 trait CT1v0 extends UnsafeTraversals {
+  ct1v0 =>
+
   trait Fresh extends Iterator[Name => Name] {
     def next(default: Name): Name
 
@@ -20,13 +22,21 @@ trait CT1v0 extends UnsafeTraversals {
   trait PatternIndex {
     def depth: Int // how deep from its binder
     def index: Int // pointer into pattern names
+    private[this] def outer: AnyRef = ct1v0 // work around https://issues.scala-lang.org/browse/SI-4440
   }
+
+  // TODO idea: make mkVar, mkIdx into a type class
 
   object Bind {
     def apply[Var, Idx <: PatternIndex, Scope]
       (head: Pattern, body: Scope)
       (implicit mkVar: Name => Var, mkIdx: (Int, Int) => Idx):
         Bind[Var, Idx, Scope] = Bindata(head, bind[Var, Idx, Scope](head.names, body))
+
+    def unapply[Var, Idx <: PatternIndex, Scope]
+      (bind: Bind[Var, Idx, Scope])
+      (implicit mkVar: Name => Var, mkIdx: (Int, Int) => Idx): Option[(Pattern, Scope)] =
+      ??? // TODO: need to replace names in a pattern by reflective copy...
 
     def bind[Var, Idx <: PatternIndex, Scope]
       (head: Vector[Name], body: Scope)
@@ -50,6 +60,23 @@ trait CT1v0 extends UnsafeTraversals {
         }
       }
       bindAt(0)(body).asInstanceOf[Scope]
+    }
+
+    def unbind[Var, Idx <: PatternIndex, Scope]
+      (head: Vector[Name], body: Scope)
+      (implicit mkVar: Name => Var, mkIdx: (Int, Int) => Idx): Scope =
+    {
+      def unbindAt(depth: Int)(body: Any): Any = body match {
+        case idx: PatternIndex if idx.depth == depth && idx == mkIdx(depth, idx.index) =>
+          mkVar(head(idx.index))
+
+        case body: Product =>
+          unsafeCopy(body, body.productIterator.map(unbindAt(depth + 1)))
+
+        case _ =>
+          body
+      }
+      unbindAt(0)(body).asInstanceOf[Scope]
     }
   }
 
