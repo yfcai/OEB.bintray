@@ -1,7 +1,7 @@
 import scala.language.higherKinds
 import scala.language.implicitConversions
 
-trait CT1v0 {
+trait CT1v0 extends UnsafeTraversals {
   trait Fresh extends Iterator[Name => Name] {
     def next(default: Name): Name
 
@@ -9,9 +9,63 @@ trait CT1v0 {
     def hasNext: Boolean = true
   }
 
-  trait Name {
+  sealed trait Bind[Var, Idx <: PatternIndex, Scope] {
+    def head: Pattern
+    def body: Scope
+  }
+
+  private case class Bindata[Var, Idx <: PatternIndex, Scope]
+    (head: Pattern, body: Scope) extends Bind[Var, Idx, Scope]
+
+  trait PatternIndex {
+    def depth: Int // how deep from its binder
+    def index: Int // pointer into pattern names
+  }
+
+  object Bind {
+    def apply[Var, Idx <: PatternIndex, Scope]
+      (head: Pattern, body: Scope)
+      (implicit mkVar: Name => Var, mkIdx: (Int, Int) => Idx):
+        Bind[Var, Idx, Scope] = Bindata(head, bind[Var, Idx, Scope](head.names, body))
+
+    def bind[Var, Idx <: PatternIndex, Scope]
+      (head: Vector[Name], body: Scope)
+      (implicit mkVar: Name => Var, mkIdx: (Int, Int) => Idx) =
+    {
+      val vars = head map mkVar
+      def bindAt(depth: Int)(body: Any): Any = {
+        val index = vars indexOf body
+        if (index >= 0)
+          mkIdx(depth, index)
+        else body match {
+          // no need to test for binders unless there are naked names in body: Scope.
+          // case Bindata(head, body) =>
+          //   Bindata(head, bindAt(depth + 1)(body))
+
+          case body: Product =>
+            unsafeCopy(body, body.productIterator.map(bindAt(depth + 1)))
+
+          case _ =>
+            body
+        }
+      }
+      bindAt(0)(body).asInstanceOf[Scope]
+    }
+  }
+
+  trait Pattern {
+    this: Product =>
+    def names: Vector[Name] =
+      Vector(unsafeMapReduce[Iterator[Name]]({
+        case name: Name => Iterator(name)
+      })(_ ++ _)(this).toSeq: _*)
+  }
+
+  trait Name extends Pattern {
+    this: Product =>
     def iterator: Iterator[Name] = Iterator(this) ++ new NameIterator(this)
     def next: Name = IndexedName(this, 0)
+    override def names: Vector[Name] = Vector(this)
   }
 
   class NameIterator(var current: Name) extends Iterator[Name] {
@@ -20,7 +74,7 @@ trait CT1v0 {
   }
 
   case class SymbolicName(symbol: Symbol) extends Name {
-    override def toString = symbol.toString.tail
+    override def toString = symbol.toString
   }
 
   case class IntegralName(integer: Int) extends Name {
@@ -33,93 +87,34 @@ trait CT1v0 {
     override def next: Name = IndexedName(root, index + 1)
   }
 
-  trait ADT[T] {
-    def children: Iterator[T]
-    def map(f: T => T): T
+  implicit def symbolToName(symbol: Symbol): Name = SymbolicName(symbol)
+  implicit def nameToTVar[T <% Name](name: T): TVar = TVar(name)
+  implicit def indicesToTIdx(depth: Int, index: Int): TIdx = TIdx(depth, index)
+
+  trait Type
+  case class TIdx(depth: Int, index: Int) extends Type with PatternIndex
+  case class TVar(name: Name) extends Type
+  case class Arrow(domain: Type, range: Type) extends Type
+  case class All(get: Bind[TVar, TIdx, Type]) extends Type
+  case class BAll(lower: Iterable[Type], upper: Iterable[Type], get: Bind[TVar, TIdx, Type])
+
+  object All {
+    def apply(head: Name, body: Type): All = All(Bind(head, body))
   }
 
-  trait Binder[Scope <: ADT[Scope], Var <: Scope, Index <: Scope] {
-    def mkVar(name: Name): Var
-    def mkIndex(i: Int): Index
+  implicit def nameToVar[T <% Name](name: T): Var = Var(name)
+  implicit def indicesToIdx(depth: Int, index: Int): Idx = Idx(depth, index)
 
-    // never test for binder
-    // increment depth at every constructor
-    // starting from 0: \x. x becomes Abs(Var('x), Idx(0))
-    def bind(head: Var, body: Scope): Scope = bindAt(0, head)(body)
+  trait Term
+  case class Var(name: Name) extends Term
+  case class Idx(depth: Int, index: Int) extends Term with PatternIndex
 
-    def bindAt(index: Int, head: Var)(body: Scope): Scope =
-      if (head == body)
-        mkIndex(index)
-      else
-        body map bindAt(index + 1, head)
-
-    def unbind(name: Name, body: Scope): Scope = unbindAt(0, name)(body)
-
-    def unbindAt(index: Int, name: Name)(body: Scope): Scope =
-      if (mkIndex(index) == body)
-        mkVar(name)
-      else
-        body map unbindAt(index + 1, name)
-  }
-
-  trait TypeBinder extends Binder[Type, TVar, TIdx] {
-    def mkVar(name: Name): TVar = TVar(name)
-    def mkIndex(i: Int): TIdx = TIdx(i)
-  }
-
-  trait Type extends ADT[Type] {
-    def children: Iterator[Type]
-
-    // free variables must override this
-    lazy val fv: Set[TVar] = children.foldRight(Set.empty[TVar])(_.fv ++ _)
-  }
-
-  case class TIdx(index: Int) extends Type {
-    def children: Iterator[Type] = Iterator.empty
-    def map(f: Type => Type): Type = this
-  }
-
-  case class TVar(name: Name) extends Type {
-    def children: Iterator[Type] = Iterator.empty
-    def map(f: Type => Type): Type = this
-    override lazy val fv = Set(this)
-  }
-
-  case class Arrow(domain: Type, range: Type) extends Type {
-    def children: Iterator[Type] = Iterator(domain, range)
-    def map(f: Type => Type): Type = Arrow(f(domain), f(range))
-  }
-
-  private case class Universal(head: TVar, body: Type) extends Type {
-    def children: Iterator[Type] = Iterator(body)
-    def map(f: Type => Type): Type = Universal(head, f(body))
-  }
-
-  private case class BoundedU(head: TVar, lower: Vector[Type], upper: Vector[Type], body: Type) extends Type {
-    def children: Iterator[Type] = Iterator(body) ++ lower.iterator ++ upper.iterator
-    def map(f: Type => Type): Type = BoundedU(head, lower map f, upper map f, f(body))
-  }
-
-  object All extends TypeBinder  {
-    def apply(head: TVar, body: Type): Type = Universal(head, bind(head, body))
-
-    def unapply[M[_]](typ: Type)(implicit fresh: Fresh): Option[(TVar, Type)] =
-      typ match {
-        case Universal(head, body) =>
-          val name = fresh next head.name
-          val tau = unbind(name, body)
-          Some((mkVar(name), tau))
-
-        case _ =>
-          None
-      }
-  }
-
-  implicit def symbolToTVar(symbol: Symbol): TVar = TVar(SymbolicName(symbol))
+  case class AnnotatedAbs(argType: Type, get: Bind[Var, Idx, Term]) extends Term
+  case class TAbs(get: Bind[TVar, TIdx, Term]) extends Term
 }
 
 trait Pretty extends CT1v0 {
-
+/*
   case class Avoider(toAvoid: Set[Name]) extends Fresh {
     def next(default: Name): Name = default.iterator.filterNot(toAvoid contains _).next
     def avoid(name: Name): Avoider = copy(toAvoid = toAvoid + name)
@@ -138,6 +133,11 @@ trait Pretty extends CT1v0 {
 
     case All(a, body) =>
       s"(∀${a.name}. ${pretty(body)(avoider avoid a.name)})"
+
+    case BAll(a, lower, upper, body) =>
+      val low = lower map plain mkString " ∪ "
+      val high = upper map plain mkString " ∩ "
+      s"(∀${a.name} ∈ [$low, $high]. ${plain(body)(avoider avoid a.name)})"
   }
 
   case class Counter(var i: Int = -1) extends Fresh {
@@ -153,6 +153,11 @@ trait Pretty extends CT1v0 {
 
     case All(a, body) =>
       s"(∀${a.name}. ${plain(body)})"
+
+    case BAll(a, lower, upper, body) =>
+      val low = lower map plain mkString " ∪ "
+      val high = upper map plain mkString " ∩ "
+      s"(∀${a.name} ∈ [$low, $high]. ${plain(body)})"
   }
 
   def parsimonious(typ: Type): String = {
@@ -166,16 +171,24 @@ trait Pretty extends CT1v0 {
 
       case All(a, body) =>
         s"(∀${a.name}. ${parsimonious(body)})"
+
+      case BAll(a, lower, upper, body) =>
+        val low = lower map parsimonious mkString " ∪ "
+        val high = upper map parsimonious mkString " ∩ "
+        s"(∀${a.name} ∈ [$low, $high]. ${parsimonious(body)})"
     }
-  }
+  }*/
 }
 
 object Test extends App with Pretty {
-  val idT = All('a, Arrow('a, All('a, Arrow(All('a, 'a), All('a, 'a)))))
-
+  val t = TAbs(Bind('a, AnnotatedAbs(Arrow('a, All(Bind('a, 'a))), Bind('x, 'x))))
+  println(t)
+/*
   // note that indices are depths, not de-Bruijn indices.
   // it is so that we don't have to distinguish binders at runtime in ADTs.
   val shadowy = All('a, Arrow('a, All('a, Arrow(All('a, TIdx(2)), All('a, TIdx(4))))))
+
+  val bounded = All('b, BAll('a, Vector('L1, Arrow('b, 'b)), Vector('U1, Arrow('Int, 'Int)), Arrow('a, 'a)))
 
   println(pretty(idT))
   println(plain(idT))
@@ -186,4 +199,11 @@ object Test extends App with Pretty {
   println(pretty(shadowy))
   println(plain(shadowy))
   println(parsimonious(shadowy))
+
+  println()
+
+  println(pretty(bounded))
+  println(plain(bounded))
+  println(parsimonious(bounded))
+ */
 }
