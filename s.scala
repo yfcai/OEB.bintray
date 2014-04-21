@@ -56,8 +56,16 @@ trait CT1v0 extends UnsafeTraversals {
 
     def unapply[Var, Idx <: PatternIndex, Scope]
       (bind: Bind[Var, Idx, Scope])
-      (implicit mkVar: Name => Var, mkIdx: (Int, Int) => Idx): Option[(Pattern, Scope)] =
-      ??? // TODO: need to replace names in a pattern by reflective copy...
+      (implicit mkVar: Name => Var, mkIdx: (Int, Int) => Idx,
+        fresh: Fresh): Option[(Pattern, Scope)] =
+      bind match {
+        case Bindata(pattern, body) =>
+          val newNames = pattern.names.map(x => fresh.next(x))
+          Some((pattern rename newNames, unbind[Var, Idx, Scope](newNames, body)))
+
+        case _ =>
+          None
+      }
 
     def bind[Var, Idx <: PatternIndex, Scope]
       (head: Vector[Name], body: Scope)
@@ -139,25 +147,34 @@ trait CT1v0 extends UnsafeTraversals {
     override def next: Name = IndexedName(root, index + 1)
   }
 
+  trait FreeNames {
+    lazy val fv: Set[Name] = unsafeMapReduce[Set[Name]]({
+      case index: PatternIndex => Set.empty
+      case name: Name => Set(name)
+      case Bindata(_, body: FreeNames) => body.fv
+      case otherwise if ! otherwise.isInstanceOf[Product] => Set.empty
+    })(_ ++ _)(this)
+  }
+
   implicit def symbolToName(symbol: Symbol): Name = SymbolicName(symbol)
   implicit def nameToTVar[T <% Name](name: T): TVar = TVar(name)
   implicit def indicesToTIdx(depth: Int, index: Int): TIdx = TIdx(depth, index)
 
-  trait Type
+  trait Type extends FreeNames
   case class TIdx(depth: Int, index: Int) extends Type with PatternIndex
   case class TVar(name: Name) extends Type
   case class Arrow(domain: Type, range: Type) extends Type
   case class All(get: Bind[TVar, TIdx, Type]) extends Type
-  case class BAll(lower: Iterable[Type], upper: Iterable[Type], get: Bind[TVar, TIdx, Type])
+  case class BAll(lower: Iterable[Type], upper: Iterable[Type], get: Bind[TVar, TIdx, Type]) extends Type
 
   object All {
-    def apply(head: Name, body: Type): All = All(Bind(head, body))
+    def apply(head: Pattern, body: Type): All = All(Bind(head, body))
   }
 
   implicit def nameToVar[T <% Name](name: T): Var = Var(name)
   implicit def indicesToIdx(depth: Int, index: Int): Idx = Idx(depth, index)
 
-  trait Term
+  trait Term extends FreeNames
   case class Var(name: Name) extends Term
   case class Idx(depth: Int, index: Int) extends Term with PatternIndex
 
@@ -166,10 +183,10 @@ trait CT1v0 extends UnsafeTraversals {
 }
 
 trait Pretty extends CT1v0 {
-/*
+
   case class Avoider(toAvoid: Set[Name]) extends Fresh {
     def next(default: Name): Name = default.iterator.filterNot(toAvoid contains _).next
-    def avoid(name: Name): Avoider = copy(toAvoid = toAvoid + name)
+    def avoid(pattern: Pattern): Avoider = copy(toAvoid = toAvoid ++ pattern.names)
   }
 
   object Avoider {
@@ -183,13 +200,13 @@ trait Pretty extends CT1v0 {
     case Arrow(domain, range) =>
       s"(${pretty(domain)} -> ${pretty(range)})"
 
-    case All(a, body) =>
-      s"(∀${a.name}. ${pretty(body)(avoider avoid a.name)})"
+    case All(Bind(a, body)) =>
+      s"(∀$a. ${pretty(body)(avoider avoid a)})"
 
-    case BAll(a, lower, upper, body) =>
-      val low = lower map plain mkString " ∪ "
-      val high = upper map plain mkString " ∩ "
-      s"(∀${a.name} ∈ [$low, $high]. ${plain(body)(avoider avoid a.name)})"
+    case BAll(lower, upper, Bind(a, body)) =>
+      val low = lower map pretty mkString " ∪ "
+      val high = upper map pretty mkString " ∩ "
+      s"(∀$a ∈ [$low, $high]. ${pretty(body)(avoider avoid a)})"
   }
 
   case class Counter(var i: Int = -1) extends Fresh {
@@ -203,17 +220,17 @@ trait Pretty extends CT1v0 {
     case Arrow(domain, range) =>
       s"(${plain(domain)} -> ${plain(range)})"
 
-    case All(a, body) =>
-      s"(∀${a.name}. ${plain(body)})"
+    case All(Bind(a, body)) =>
+      s"(∀$a. ${plain(body)})"
 
-    case BAll(a, lower, upper, body) =>
+    case BAll(lower, upper, Bind(a, body)) =>
       val low = lower map plain mkString " ∪ "
       val high = upper map plain mkString " ∩ "
-      s"(∀${a.name} ∈ [$low, $high]. ${plain(body)})"
+      s"(∀$a ∈ [$low, $high]. ${plain(body)})"
   }
 
   def parsimonious(typ: Type): String = {
-    implicit def avoider: Avoider = Avoider(typ.fv.map(_.name))
+    implicit def avoider: Avoider = Avoider(typ.fv)
     typ match {
       case TVar(name) =>
         name.toString
@@ -221,32 +238,26 @@ trait Pretty extends CT1v0 {
       case Arrow(domain, range) =>
         s"(${parsimonious(domain)} -> ${parsimonious(range)})"
 
-      case All(a, body) =>
-        s"(∀${a.name}. ${parsimonious(body)})"
+      case All(Bind(a, body)) =>
+        s"(∀$a. ${parsimonious(body)})"
 
-      case BAll(a, lower, upper, body) =>
+      case BAll(lower, upper, Bind(a, body)) =>
         val low = lower map parsimonious mkString " ∪ "
         val high = upper map parsimonious mkString " ∩ "
-        s"(∀${a.name} ∈ [$low, $high]. ${parsimonious(body)})"
+        s"(∀a ∈ [$low, $high]. ${parsimonious(body)})"
     }
-  }*/
+  }
 }
 
 object Test extends App with Pretty {
-  val t = TAbs(Bind('a, AnnotatedAbs(Arrow('a, All(Bind('a, 'a))), Bind('x, 'x))))
-  println(t)
-/*
+  val term = TAbs(Bind('a, AnnotatedAbs(Arrow('a, All(Bind('a, 'a))), Bind('x, 'x))))
+
   // note that indices are depths, not de-Bruijn indices.
   // it is so that we don't have to distinguish binders at runtime in ADTs.
-  val shadowy = All('a, Arrow('a, All('a, Arrow(All('a, TIdx(2)), All('a, TIdx(4))))))
+  val shadowy = All(Bind('a, Arrow('a, All(Bind('a, Arrow(All(Bind('a, TIdx(3, 0))), All(Bind('a, TIdx(6, 0)))))))))
 
-  val bounded = All('b, BAll('a, Vector('L1, Arrow('b, 'b)), Vector('U1, Arrow('Int, 'Int)), Arrow('a, 'a)))
+  val bounded = All('b, BAll(Vector('L1, Arrow('b, 'b)), Vector('U1, Arrow('Int, 'Int)), Bind('a, Arrow('a, 'a))))
 
-  println(pretty(idT))
-  println(plain(idT))
-  println(parsimonious(idT))
-
-  println()
 
   println(pretty(shadowy))
   println(plain(shadowy))
@@ -257,5 +268,9 @@ object Test extends App with Pretty {
   println(pretty(bounded))
   println(plain(bounded))
   println(parsimonious(bounded))
- */
+
+  println()
+
+  println(s"('a → 'b → 'c).fv = ${Arrow('a, Arrow('b, 'c)).fv}")
+  println(s"(∀'a. 'a → 'b).fv = ${All(Bind(Names('a), Arrow('a, 'b))).fv}")
 }

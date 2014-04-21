@@ -6,7 +6,7 @@ trait UnsafeTraversals {
   // whatever mappable are mapped
   // the rest are reduced
   def unsafeMapReduce[R]
-    (map: PartialFunction[Nothing, R])
+    (map: PartialFunction[Any, R])
     (reduce: (R, R) => R)
     (tree: Any): R =
     map.asInstanceOf[PartialFunction[Any, R]].applyOrElse[Any, R](tree, {
@@ -32,10 +32,10 @@ trait UnsafeTraversals {
         sys error s"unsafeCopy: $klass has product arity ${t.productArity}, but ${aseq.length} arguments are given"
       val params = copy.getParameterTypes
       val result: Any =
-        if (typeMatches(params, aseq))
-          copy.invoke(t, aseq: _*)
-        else if (params.length == 1) // scala variadic
+        if (params.length == 1 && params.head.isInstance(aseq)) // scala variadic
           copy.invoke(t, aseq)
+        else if (params.length == aseq.length) // difference between boxed & unboxed things...
+          copy.invoke(t, aseq: _*)
         else
           sys error s"unsafeCopy: $klass.copy has parameter types ${params.toList}, but arguments types are ${aseq.map(_.getClass)}"
       result.asInstanceOf[T]
