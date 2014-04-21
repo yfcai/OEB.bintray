@@ -11,6 +11,27 @@ trait CT1v0 extends UnsafeTraversals {
     def hasNext: Boolean = true
   }
 
+  trait Pattern {
+    this: Product =>
+    def names: Vector[Name] =
+      Vector(unsafeMapReduce[Iterator[Name]]({
+        case name: Name => Iterator(name)
+      })(_ ++ _)(this).toSeq: _*)
+
+    def rename(_newNames: Seq[Name]): Pattern = {
+      require(names.length == _newNames.length)
+      val newNames = _newNames.iterator // use mutation to thread newNames in preorder
+      def loop(any: Any): Any = any match {
+        case name: Name =>
+          newNames.next
+
+        case product: Pattern with Product =>
+          unsafeCopy(product, product.productIterator.map(loop))
+      }
+      loop(this).asInstanceOf[Pattern]
+    }
+  }
+
   sealed trait Bind[Var, Idx <: PatternIndex, Scope] {
     def head: Pattern
     def body: Scope
@@ -80,12 +101,16 @@ trait CT1v0 extends UnsafeTraversals {
     }
   }
 
-  trait Pattern {
-    this: Product =>
-    def names: Vector[Name] =
-      Vector(unsafeMapReduce[Iterator[Name]]({
-        case name: Name => Iterator(name)
-      })(_ ++ _)(this).toSeq: _*)
+  // scala collections cannot be a part of patterns because
+  // 1. `unsafeCopy` requires a `copy` method defined automatically for case classes,
+  // 2. scala collections don't have this `copy` method defined in a sensible manner.
+
+  case class Names(_names: Name*) extends Pattern with Product {
+    override lazy val names: Vector[Name] = _names.toVector
+    override def productArity: Int = names.length
+    override def productIterator: Iterator[Any] = names.iterator
+
+    def copy(_names: Name*): Names = Names(_names: _*)
   }
 
   trait Name extends Pattern {

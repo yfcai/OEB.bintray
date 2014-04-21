@@ -19,10 +19,27 @@ trait UnsafeTraversals {
     // DO NOT call args.length! args is an iterator and can only iterate once!
     if (t.productArity == 0 && args.isEmpty)
       t
-    else
-      klass.getMethods.find(_.getName == "copy").
-        getOrElse(sys error s"No `copy` method found when reflectively copying $t of type $klass").
-        invoke(t, args.toSeq.asInstanceOf[Seq[Object]]: _*).asInstanceOf[T]
+    else {
+      val copyMethods = klass.getMethods.filter(_.getName == "copy")
+      copyMethods.length match {
+        case 0 => sys error s"unsafeCopy: $klass has no copy method"
+        case 1 => ()
+        case n => sys error s"unsafeCopy: $klass has $n copy methods, but it should have only 1"
+      }
+      val copy = copyMethods.head
+      val aseq = args.toSeq.asInstanceOf[Seq[Object]]
+      if (t.productArity != aseq.length)
+        sys error s"unsafeCopy: $klass has product arity ${t.productArity}, but ${aseq.length} arguments are given"
+      val params = copy.getParameterTypes
+      val result: Any =
+        if (typeMatches(params, aseq))
+          copy.invoke(t, aseq: _*)
+        else if (params.length == 1) // scala variadic
+          copy.invoke(t, aseq)
+        else
+          sys error s"unsafeCopy: $klass.copy has parameter types ${params.toList}, but arguments types are ${aseq.map(_.getClass)}"
+      result.asInstanceOf[T]
+    }
   }
 
   def unsafeRewrite[T](rule: PartialFunction[Nothing, Any])(tree: T): T =
@@ -33,4 +50,13 @@ trait UnsafeTraversals {
       case _ =>
         tree
     })
+
+  def typeMatches(classes: Array[Class[_]], args: Seq[Object]): Boolean = {
+    if (classes.isEmpty && args.isEmpty)
+      true
+    else if (classes.length == args.length)
+      classes.zip(args).map(p => p._1 isInstance p._2).min
+    else // classes.length != args.length
+      false
+  }
 }
